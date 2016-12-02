@@ -399,9 +399,7 @@ static int clockAlgorithm(PageTableEntryPtr pageToLoad) {
         }
     }
 
-    /* CLOCK ALGORITHM */
     /* Now using the clock hand look for the first unreferenced frame */
-    // TODO: Need mutual exclusion for clock hand
     while (1) {
         curFrame = &frameTable[clockHand];
 
@@ -603,6 +601,10 @@ void checkDiskStatus(int status, char *name)
 
 
 
+// TODO: mutual exclusion for clock hand
+// TODO: vmdestroy
+// TODO: 
+// TODO: 
 
 
 
