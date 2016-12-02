@@ -8,15 +8,43 @@
  */
 #define TAG 0
 
+#define NOT_ON_DISK         -1
+#define PAGE_NOT_IN_FRAME   -1
+#define SECTORS_IN_FRAME     8
+
+
+#define TRACK_START          0
+
 /*
- * Different states for a page.
- */
-#define UNUSED 500
-#define INCORE 501
+    Different states for a page.
+*/
+#define UNUSED          500
+#define INUSE           501
+
+
+/*
+    Different states for a frame.
+*/
+
+// For reference number
+#define UNREFERENCED           0
+#define REFERENCED             1
+
+// For frame in use or not in use
+#define NOT_USED        0
+#define USED            1
+
+// For frame state
+#define CLEAN           502
+#define DIRTY           503 
+#define PAGER_OWNED     504
+
+
 /* You'll probably want more states */
 
 /* typedefs */
 typedef struct PageTableEntry *PageTableEntryPtr;
+typedef struct FrameTableEntry *FrameTableEntryPtr;
 typedef struct FaultMsg *FaultMsgPtr;
 
 /*
@@ -49,10 +77,17 @@ typedef struct FaultMsg {
     // Add more stuff here.
 } FaultMsg;
 
-
 /*
-    We will also have a frames structure that keeps track of the frames created
+ *  Frames structure that keeps track of the frames created
  */
+typedef struct FrameTableEntry {
+    int used;
+    int state;
+    int referenceNum;
+    int pid;
+    int pageNum;
+    int timeStamp;
+} FrameTableEntry;
 
 
 #define CheckMode() assert(USLOSS_PsrGet() & USLOSS_PSR_CURRENT_MODE)

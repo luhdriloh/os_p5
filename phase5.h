@@ -49,7 +49,7 @@ typedef struct VmStats {
     int newFaults;      // # faults caused by previously unused pages
     int pageIns;        // # faults that required reading page from disk
     int pageOuts;       // # faults that required writing a page to disk
-    int replaced;	// # pages replaced; i.e., frame had a page and we
+    int replaced;       // # pages replaced; i.e., frame had a page and we
                         //   replaced that page in the frame with a different
                         //   page. */
 } VmStats;
