@@ -12,7 +12,7 @@
 #include <stdlib.h>
 #include <phase1.h>
 #include <phase2.h>
-
+#include <vm.h>
 
 /*
  * Error Value
@@ -53,6 +53,14 @@ typedef struct VmStats {
                         //   replaced that page in the frame with a different
                         //   page. */
 } VmStats;
+
+
+extern Process processes[MAXPROC];
+extern PageTableEntryPtr PageTable[MAXPROC];
+extern int tracksInUse[NUM_TRACKS];
+FrameTableEntryPtr frameTable;
+extern int vmStart;
+extern int numPages;
 
 /* Function Prototypes */
 

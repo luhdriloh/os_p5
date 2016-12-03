@@ -2,7 +2,7 @@
  * vm.h
  */
 
-
+#include <usloss.h>
 /*
  * All processes use the same tag.
  */
@@ -11,34 +11,31 @@
 #define NOT_ON_DISK         -1
 #define PAGE_NOT_IN_FRAME   -1
 #define SECTORS_IN_FRAME     8
-
+#define PAGER_PAGE           0
 
 #define TRACK_START          0
+#define NUM_TRACKS           16
 
-/*
-    Different states for a page.
-*/
-#define UNUSED          500
-#define INUSE           501
+/* Mailbox status */
+#define MAILBOX_RELEASED -3
 
 
-/*
-    Different states for a frame.
-*/
+/* VM started macro */
+#define VM_STARTED        1
+#define VM_STOPPED        0
+
+/* Different states for a frame */
 
 // For reference number
 #define UNREFERENCED           0
-#define REFERENCED             1
+#define REFERENCED             USLOSS_MMU_REF
+#define DIRTY                  USLOSS_MMU_DIRTY
+#define PAGER_OWNED            3
+
 
 // For frame in use or not in use
 #define NOT_USED        0
 #define USED            1
-
-// For frame state
-#define CLEAN           502
-#define DIRTY           503 
-#define PAGER_OWNED     504
-
 
 /* You'll probably want more states */
 
@@ -83,10 +80,8 @@ typedef struct FaultMsg {
 typedef struct FrameTableEntry {
     int used;
     int state;
-    int referenceNum;
     int pid;
     int pageNum;
-    int timeStamp;
 } FrameTableEntry;
 
 
