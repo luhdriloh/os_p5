@@ -6,7 +6,6 @@
 #include <phase5.h>
 #include <usyscall.h>
 #include <libuser.h>
-#include <vm.h>
 #include <providedPrototypes.h>
 #include <string.h>
 
@@ -23,13 +22,14 @@ static void vmDestroy(systemArgs *sysargsPtr);
 static void *vmInitReal(int mappings, int pages, int frames, int pagers);
 static void vmDestroyReal(void);
 static int Pager(char *buf);
-void setFrameEntryMembers(int frameIndex, int state, int pid,
-                            int pageNum, int reference, int used);
+void setFrameEntryMembers(int pid, int frameIndex, int state, int dirty, 
+                            int pageNum, int used, int pagerOwned);
 void setPageEntryMembers(int pid, int pageNum, int state,
                             int frame, int diskBlock);
 void checkDiskStatus(int status, char *name);
 void readWriteToFrame(int frameIndex, void *dest, void *src);
 int findOpenTrack();
+void PrintStats();
 
 
 PageTableEntryPtr pageTable[MAXPROC];
@@ -38,11 +38,14 @@ FaultMsg faults[MAXPROC];
 FrameTableEntryPtr frameTable;
 int numFrames;
 int numPages;
+int numTracks;
 int clockHand;
+int clockHandMailbox;
+int frameMailbox;
 int pageSize;
 int pagersMailbox;
 int pagerPIDS[MAXPAGERS];
-int tracksInUse[NUM_TRACKS];
+int *tracksInUse;
 int vmStarted;
 void *vmRegion; // start of virtual memory frames
 VmStats  vmStats;
@@ -80,11 +83,6 @@ int start4(char *arg)
     systemCallVec[SYS_VMINIT]    = vmInit;
     systemCallVec[SYS_VMDESTROY] = vmDestroy;
 
-    /* Initialize the fault mailboxes for each individual process */
-    for (int process = 0; process < MAXPROC; process++) {
-        faults[process].replyMbox = MboxCreate(0, 0);
-    }
-
     /* Set pagerPIDS to -1 */
     for (int pager = 0; pager < MAXPAGERS; pager++) {
         pagerPIDS[pager] = -1;
@@ -102,7 +100,8 @@ int start4(char *arg)
         USLOSS_Console("start4(): Error waiting for start5\n");
         Terminate(1);
     }
-
+    
+    PrintStats();
     Terminate(0);
     return 0; // not reached
 
@@ -151,10 +150,17 @@ static void vmInit(systemArgs *sysargsPtr)
 
     /* Check error value */
     if (status == ERROR) {
-        sysargsPtr->arg1 = (void *) ERROR;
+        sysargsPtr->arg4 = (void *) ERROR;
         return;
     }
 
+    /* Check if vmInit has already been called */
+    if (vmStarted == VM_STARTED) {
+        sysargsPtr->arg4 = (void *) -2;
+        return;
+    }
+
+    sysargsPtr->arg4 = OK;
     sysargsPtr->arg1 = vmInitReal(mappings, pages, frames, pagers);
 } /* vmInit */
 
@@ -178,12 +184,12 @@ static void vmInit(systemArgs *sysargsPtr)
  */
 void *vmInitReal(int mappings, int pages, int frames, int pagers)
 {
-    int status, errorMMU;
+    int status;
     char name[20];
 
     CheckMode();
     status = USLOSS_MmuInit(mappings, pages, frames);
-    
+
     if (status != USLOSS_MMU_OK) {
       USLOSS_Console("vmInitReal: couldn't init MMU, status %d\n", status);
       abort();
@@ -214,12 +220,18 @@ void *vmInitReal(int mappings, int pages, int frames, int pagers)
     clockHand = 0;
 
     for (int frame = 0; frame < numFrames; frame++) {
-        frameTable[frame].used = NOT_USED;
-        frameTable[frame].state = UNREFERENCED;
+        setFrameEntryMembers(NO_PID, frame, UNREFERENCED, CLEAN, PAGE_NOT_IN_FRAME, NOT_USED, NOT_PAGER_OWNED);
     }
 
-    /* Create the fault mailbox */
+    /* Create the fault, and clockhand mailbox and fault mailboxes */
     pagersMailbox = MboxCreate(MAXPROC, sizeof(int));
+    clockHandMailbox = MboxCreate(1, 0);
+    frameMailbox = MboxCreate(1, 0);
+
+    /* Initialize the fault mailboxes for each individual process */
+    for (int process = 0; process < MAXPROC; process++) {
+        faults[process].replyMbox = MboxCreate(0, 0);
+    }
 
     /* Get size of a page and fork the pagers with buffer */
     pageSize = USLOSS_MmuPageSize();
@@ -236,26 +248,23 @@ void *vmInitReal(int mappings, int pages, int frames, int pagers)
     vmStats.freeFrames = frames;
     vmStats.switches = 0;
     vmStats.faults = 0;
-    vmStats.newFaults = 0;
+    vmStats.new = 0;
     vmStats.pageIns = 0;
     vmStats.pageOuts = 0;
     vmStats.replaced = 0;
 
     /* Initialize other vmStats fields */
-    int sector, track, disk;
-    DiskSize(DISK1, &sector, &track, &disk);
+    int sector, track, disk, blocks;
+    diskSizeReal(DISK1, &sector, &track, &disk);
 
-    vmStats.diskBlocks = disk;
-    vmStats.freeDiskBlocks = disk;
+    blocks = ((sector * track) / pageSize) * disk;
+    vmStats.diskBlocks = blocks;
+    vmStats.freeDiskBlocks = blocks;
+    tracksInUse = calloc(disk, sizeof(int));
+    numTracks = disk;
 
     /* Create vm Region */
-    errorMMU = USLOSS_MmuInit(mappings, pages, frames);
-    if (errorMMU != USLOSS_MMU_OK) {
-        USLOSS_Console("vmInitReal(): Error creating mmu unit. Halting...\n");
-        USLOSS_Halt(1);
-    }
-
-    vmRegion = USLOSS_MmuRegion(NULL);
+    vmRegion = USLOSS_MmuRegion(&numPages);
 
     vmStarted = VM_STARTED;
     return vmRegion;
@@ -311,7 +320,7 @@ void vmDestroyReal(void)
     int joinStatus;
     
     /*  Kill the pagers here. */
-    Mbox_Release(pagersMailbox);
+    MboxRelease(pagersMailbox);
     for (int pager = 0; pager < MAXPAGERS; pager++) {
         if (pagerPIDS[pager] == -1) {
             break;
@@ -325,17 +334,11 @@ void vmDestroyReal(void)
         free(pageTable[process]);
     }
 
-    /* Free frame table */
+    /* Free frame table and track array */
     free(frameTable);
-
-    /* Print vm statistics */
-    USLOSS_Console("vmStats:\n");
-    USLOSS_Console("pages: %d\n", vmStats.pages);
-    USLOSS_Console("frames: %d\n", vmStats.frames);
-    USLOSS_Console("blocks: %d\n", vmStats.diskBlocks);
+    free(tracksInUse);
 
     vmStarted = VM_STOPPED;
-
 } /* vmDestroyReal */
 
 
@@ -364,7 +367,7 @@ void PrintStats(void)
     USLOSS_Console("freeDiskBlocks: %d\n", vmStats.freeDiskBlocks);
     USLOSS_Console("switches:       %d\n", vmStats.switches);
     USLOSS_Console("faults:         %d\n", vmStats.faults);
-    USLOSS_Console("new:            %d\n", vmStats.newFaults);
+    USLOSS_Console("new:            %d\n", vmStats.new);
     USLOSS_Console("pageIns:        %d\n", vmStats.pageIns);
     USLOSS_Console("pageOuts:       %d\n", vmStats.pageOuts);
     USLOSS_Console("replaced:       %d\n", vmStats.replaced);
@@ -391,10 +394,8 @@ void PrintStats(void)
 static void FaultHandler(int  type /* USLOSS_MMU_INT */,
              void *arg  /* Offset within VM region */)
 {
-    int cause, pid, offset;
+    int cause, pid;
     FaultMsgPtr faultMsg;
-
-    offset = (int) (long) arg;
     pid = getpid();
 
     assert(type == USLOSS_MMU_INT);
@@ -402,12 +403,13 @@ static void FaultHandler(int  type /* USLOSS_MMU_INT */,
     assert(cause == USLOSS_MMU_FAULT);
     vmStats.faults++;
 
-    faultMsg = &faults[pid % MAXPROC];
+    faultMsg = &(faults[pid % MAXPROC]);
     faultMsg->pid = pid;
-    faultMsg->addr = (void *) (long) offset;
+    faultMsg->offset = (long) arg;
+    
 
-    Mbox_Send(pagersMailbox, (void *) (long) pid, sizeof(int));
-    Mbox_Receive(faultMsg->replyMbox, NULL, 0);
+    MboxSend(pagersMailbox, (void *) (&pid), sizeof(int));
+    MboxReceive(faultMsg->replyMbox, NULL, 0);
 } /* FaultHandler */
 
 
@@ -429,6 +431,9 @@ static void FaultHandler(int  type /* USLOSS_MMU_INT */,
  */
 static int clockAlgorithm(PageTableEntryPtr pageToLoad) {
     FrameTableEntryPtr curFrame;
+    int dirty, frameToReturn;
+
+    frameToReturn = 0;
 
     /* Look for an unreferenced and clean frame */
     for (int frame = 0; frame < numFrames; frame++) {
@@ -440,23 +445,34 @@ static int clockAlgorithm(PageTableEntryPtr pageToLoad) {
     }
 
     /* Now using the clock hand look for the first unreferenced frame */
+    MboxSend(clockHandMailbox, NULL, 0);
     while (1) {
+        dirty = 0;
         curFrame = &frameTable[clockHand];
+        
+        /* Lets check if the frame is dirty */
+        USLOSS_MmuGetAccess(clockHand, &dirty);
+        if (dirty >= DIRTY) {
+            curFrame->dirty = DIRTY;
+        }
 
+        /* If the state is unreferenced and not pager owned take the frame */
         if (curFrame->state == UNREFERENCED ||
-                curFrame->used != PAGER_OWNED) {
-            setFrameEntryMembers(0, clockHand, PAGER_PAGE, REFERENCED,
-                                 PAGER_OWNED);
+                curFrame->pagerOwned != PAGER_OWNED) {
+            setFrameEntryMembers(curFrame->pid, clockHand, curFrame->state, curFrame->dirty, curFrame->pageNum, curFrame->used, PAGER_OWNED);
+            frameToReturn = clockHand;
+            clockHand = (clockHand+1) % numFrames;
             break;
         }
 
-        if (curFrame->used != PAGER_OWNED) {
+        if (curFrame->pagerOwned != PAGER_OWNED) {
             curFrame->state = UNREFERENCED;            
         }
         clockHand = (clockHand+1) % numFrames;
     }
+    MboxReceive(clockHandMailbox, NULL, 0);
 
-    return clockHand;
+    return frameToReturn;
 }
 
 
@@ -478,17 +494,17 @@ static int clockAlgorithm(PageTableEntryPtr pageToLoad) {
 static int Pager(char *buf)
 {
     int pid, frameIndex, pageNum, diskStatus, mailboxStatus;
-    void *framePtr;
     FaultMsgPtr faultPtr;
     FrameTableEntryPtr frameToUse;
     PageTableEntryPtr pageToLoad, pageToChange;
 
     /* Allocate memory for the buffer */
     buf = (char *) malloc(sizeof(char) * pageSize);
+    pid = 0;
 
     while(1) {
         /* Mbox receive will tell us the pid */
-        mailboxStatus = Mbox_Receive(pagersMailbox, &pid, sizeof(int));
+        mailboxStatus = MboxReceive(pagersMailbox, (void *) &pid, sizeof(int));
         if (mailboxStatus == MAILBOX_RELEASED) {
             free(buf);
             return 0;
@@ -497,65 +513,72 @@ static int Pager(char *buf)
         faultPtr = &faults[pid % MAXPROC];
 
         /* Find the page number based on the addr the fault happened */
-        pageNum = ((long) faultPtr->addr - (long) vmRegion) / pageSize;
+        pageNum = faultPtr->offset / pageSize;
         pageToLoad = &pageTable[pid % MAXPROC][pageNum];
-
-        /* Find frame to use with clockAlgorithm */       
+        
+        /* Find frame to use with clockAlgorithm */  
         frameIndex = clockAlgorithm(pageToLoad);
         frameToUse = &frameTable[frameIndex];
-
-        /* Create a pointer to the frame we want to use */
-        framePtr = (void *) ((char *) vmRegion + (pageSize * frameIndex));
 
         /* Update the page table of the process that owns the frame */
         if (frameToUse->used == USED) {
             int indexPageToSave, pidToSave;
-                
+
             indexPageToSave = frameToUse->pageNum;
             pidToSave = frameToUse->pid;
             pageToChange = &pageTable[pidToSave % MAXPROC][indexPageToSave];
-            USLOSS_MmuGetAccess(frameIndex, &frameToUse->state);
 
             /* Save frame into disk */
-            if (frameToUse->state == DIRTY) {
+            if (frameToUse->dirty >= DIRTY) {
+
                 /* See if this is our first time storing frame on disk */
                 if (pageToChange->diskBlock == NOT_ON_DISK) {
                     pageToChange->diskBlock = findOpenTrack();
                 }
 
                 /* Copy frame to buffer then to disk */
-                readWriteToFrame(frameIndex, buf, framePtr);
+                vmStats.pageOuts++;
+
+                readWriteToFrame(frameIndex, buf, vmRegion);
                 diskStatus = diskWriteReal(DISK1, pageToChange->diskBlock,
                         TRACK_START, SECTORS_IN_FRAME, (void *) buf);
                 checkDiskStatus(diskStatus, "Pager(): writing to disk");
             }
-
             /* Set page table entry on old process */
+            USLOSS_MmuUnmap(TAG, indexPageToSave);
             setPageEntryMembers(pidToSave, indexPageToSave, USED,
                                     PAGE_NOT_IN_FRAME, pageToChange->diskBlock);
         }
-       
+
         /* Check if we need to read from disk or zero out frame */
         if (pageToLoad->diskBlock != NOT_ON_DISK) {
             /* Copy page from disk into buffer then into frame */
+            vmStats.pageIns++;
             diskStatus = diskReadReal(DISK1, pageToLoad->diskBlock,
                     TRACK_START, SECTORS_IN_FRAME, (void *) buf);
             checkDiskStatus(diskStatus, "Pager(): reading from disk");
-            readWriteToFrame(frameIndex, framePtr, buf);
+            readWriteToFrame(frameIndex, vmRegion, buf);
         }
         else {
-            memset(framePtr, 0, pageSize);
+            memset(buf, 0, pageSize);
+            readWriteToFrame(frameIndex, vmRegion, buf);
         }
 
         /* Set members inside frame entry and process page table */
+        if (pageToLoad->state == NOT_USED) {
+            vmStats.new++;
+        }
 
-        setFrameEntryMembers(pid, frameIndex, pageNum, REFERENCED, USED);
+        setFrameEntryMembers(pid, frameIndex, REFERENCED, CLEAN, pageNum, USED, NOT_PAGER_OWNED);
         setPageEntryMembers(pid, pageNum, USED, frameIndex,
-                            pageToChange->diskBlock);
+                            pageToLoad->diskBlock);
 
-        /* Map the page to the empty frame found and wake fault handler*/
+        /* Map the page to frame, wake fault handler, and set access bit */
+
+        USLOSS_MmuSetAccess(frameIndex, REFERENCED);
         USLOSS_MmuMap(TAG, pageNum, frameIndex, USLOSS_MMU_PROT_RW);
-        Mbox_Send(faultPtr->replyMbox, NULL, 0);
+
+        MboxSend(faultPtr->replyMbox, NULL, 0);
     }
     return 0;
 } /* Pager */
@@ -577,15 +600,17 @@ static int Pager(char *buf)
  *----------------------------------------------------------------------
  */
 
-void setFrameEntryMembers(int pid, int frameIndex, int state,
-                            int pageNum, int used)
+void setFrameEntryMembers(int pid, int frameIndex, int state, int dirty, 
+                            int pageNum, int used, int pagerOwned)
 {
     FrameTableEntryPtr frameToUpdate = &frameTable[frameIndex];
 
     frameToUpdate->pid = pid;
     frameToUpdate->state = state;
+    frameToUpdate->dirty = dirty;
     frameToUpdate->pageNum = pageNum;
     frameToUpdate->used = used;
+    frameToUpdate->pagerOwned = pagerOwned;
 }
 
 
@@ -660,9 +685,13 @@ void checkDiskStatus(int status, char *name)
 void readWriteToFrame(int frameIndex, void *dest, void *src)
 {
     /* Map frame to PAGER_PAGE( == 0) then write or read from frame */
+    MboxSend(frameMailbox, NULL, 0);
+    
     USLOSS_MmuMap(TAG, PAGER_PAGE, frameIndex, USLOSS_MMU_PROT_RW);
     memcpy(dest, src, pageSize);
     USLOSS_MmuUnmap(TAG, PAGER_PAGE);
+    
+    MboxReceive(frameMailbox, NULL, 0);
 }
 
 
@@ -684,8 +713,9 @@ void readWriteToFrame(int frameIndex, void *dest, void *src)
 
 int findOpenTrack()
 {
-    for (int track = 0; track < NUM_TRACKS; track++) {
+    for (int track = 0; track < numTracks; track++) {
         if (tracksInUse[track] == NOT_USED) {
+            vmStats.freeDiskBlocks--;
             tracksInUse[track] = USED;
             return track;
         }

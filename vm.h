@@ -1,7 +1,3 @@
-/*
- * vm.h
- */
-
 #include <usloss.h>
 /*
  * All processes use the same tag.
@@ -12,12 +8,12 @@
 #define PAGE_NOT_IN_FRAME   -1
 #define SECTORS_IN_FRAME     8
 #define PAGER_PAGE           0
+#define NO_PID              -1
 
 #define TRACK_START          0
-#define NUM_TRACKS           16
 
 /* Mailbox status */
-#define MAILBOX_RELEASED -3
+#define MAILBOX_RELEASED     -3
 
 
 /* VM started macro */
@@ -30,7 +26,9 @@
 #define UNREFERENCED           0
 #define REFERENCED             USLOSS_MMU_REF
 #define DIRTY                  USLOSS_MMU_DIRTY
-#define PAGER_OWNED            3
+#define CLEAN                  0
+#define PAGER_OWNED            1
+#define NOT_PAGER_OWNED        0
 
 
 // For frame in use or not in use
@@ -38,11 +36,6 @@
 #define USED            1
 
 /* You'll probably want more states */
-
-/* typedefs */
-typedef struct PageTableEntry *PageTableEntryPtr;
-typedef struct FrameTableEntry *FrameTableEntryPtr;
-typedef struct FaultMsg *FaultMsgPtr;
 
 /*
  * Page table entry.
@@ -59,8 +52,8 @@ typedef struct PageTableEntry {
  */
 typedef struct Process {
     int  numPages;   // Size of the page table.
-    int  pagesInUse;
-    PageTableEntryPtr PageTable; // The page table for the process.
+    int pagesInUse;
+    PageTableEntry *PageTable; // The page table for the process.
 } Process;
 
 /*
@@ -69,7 +62,7 @@ typedef struct Process {
  */
 typedef struct FaultMsg {
     int  pid;        // Process with the problem.
-    void *addr;      // Address that caused the fault.
+    int  offset;      // Address that caused the fault.
     int  replyMbox;  // Mailbox to send reply.
     // Add more stuff here.
 } FaultMsg;
@@ -78,11 +71,19 @@ typedef struct FaultMsg {
  *  Frames structure that keeps track of the frames created
  */
 typedef struct FrameTableEntry {
+    int pagerOwned;
     int used;
     int state;
+    int dirty;
     int pid;
     int pageNum;
 } FrameTableEntry;
+
+
+/* typedefs */
+typedef struct PageTableEntry *PageTableEntryPtr;
+typedef struct FrameTableEntry *FrameTableEntryPtr;
+typedef struct FaultMsg *FaultMsgPtr;
 
 
 #define CheckMode() assert(USLOSS_PsrGet() & USLOSS_PSR_CURRENT_MODE)

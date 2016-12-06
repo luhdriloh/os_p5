@@ -17,8 +17,8 @@
 /*
  * Error Value
  */
-#define ERROR   -1
-#define OK       0
+#define ERROR        -1
+#define OK            0
 
 /*
  * Pager priority.
@@ -46,7 +46,7 @@ typedef struct VmStats {
     int freeDiskBlocks; // # of blocks that are not in-use
     int switches;       // # of context switches
     int faults;         // # of page faults
-    int newFaults;      // # faults caused by previously unused pages
+    int new;            // # faults caused by previously unused pages
     int pageIns;        // # faults that required reading page from disk
     int pageOuts;       // # faults that required writing a page to disk
     int replaced;       // # pages replaced; i.e., frame had a page and we
@@ -56,16 +56,16 @@ typedef struct VmStats {
 
 
 extern Process processes[MAXPROC];
-extern PageTableEntryPtr PageTable[MAXPROC];
-extern int tracksInUse[NUM_TRACKS];
-FrameTableEntryPtr frameTable;
-extern int vmStart;
+extern PageTableEntryPtr pageTable[MAXPROC];
+extern int *tracksInUse;
+extern FrameTableEntryPtr frameTable;
+extern int vmStarted;
 extern int numPages;
+extern int frameMailbox;
+extern VmStats  vmStats;
 
 /* Function Prototypes */
+extern  int  start5(char *);
 
-
-
-extern VmStats	vmStats;
 
 #endif /* _PHASE5_H */
