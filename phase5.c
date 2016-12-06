@@ -435,17 +435,21 @@ static int clockAlgorithm(PageTableEntryPtr pageToLoad) {
 
     frameToReturn = 0;
 
-    /* Look for an unreferenced and clean frame */
+    /* Look for an unused frame */
     for (int frame = 0; frame < numFrames; frame++) {
         curFrame = &frameTable[frame];
 
-        if (curFrame->used == NOT_USED) {
+        if (curFrame->used == NOT_USED &&
+            curFrame->pagerOwned == NOT_PAGER_OWNED) {
+            setFrameEntryMembers(curFrame->pid, frame, curFrame->state, curFrame->dirty, curFrame->pageNum, NOT_USED, PAGER_OWNED);
+            clockHand = (clockHand+1) % numFrames;
             return frame;
         }
     }
 
     /* Now using the clock hand look for the first unreferenced frame */
     MboxSend(clockHandMailbox, NULL, 0);
+
     while (1) {
         dirty = 0;
         curFrame = &frameTable[clockHand];
@@ -509,7 +513,6 @@ static int Pager(char *buf)
             free(buf);
             return 0;
         }
-
         faultPtr = &faults[pid % MAXPROC];
 
         /* Find the page number based on the addr the fault happened */
@@ -536,7 +539,7 @@ static int Pager(char *buf)
                     pageToChange->diskBlock = findOpenTrack();
                 }
 
-                /* Copy frame to buffer then to disk */
+                /* Increment page out, copy frame to buffer then to disk */
                 vmStats.pageOuts++;
 
                 readWriteToFrame(frameIndex, buf, vmRegion);
@@ -574,7 +577,6 @@ static int Pager(char *buf)
                             pageToLoad->diskBlock);
 
         /* Map the page to frame, wake fault handler, and set access bit */
-
         USLOSS_MmuSetAccess(frameIndex, REFERENCED);
         USLOSS_MmuMap(TAG, pageNum, frameIndex, USLOSS_MMU_PROT_RW);
 
@@ -684,14 +686,10 @@ void checkDiskStatus(int status, char *name)
 
 void readWriteToFrame(int frameIndex, void *dest, void *src)
 {
-    /* Map frame to PAGER_PAGE( == 0) then write or read from frame */
-    MboxSend(frameMailbox, NULL, 0);
-    
+    /* Map frame to PAGER_PAGE( == 0) then write or read from frame */  
     USLOSS_MmuMap(TAG, PAGER_PAGE, frameIndex, USLOSS_MMU_PROT_RW);
     memcpy(dest, src, pageSize);
     USLOSS_MmuUnmap(TAG, PAGER_PAGE);
-    
-    MboxReceive(frameMailbox, NULL, 0);
 }
 
 

@@ -35,29 +35,21 @@ void p1_switch(int old, int newPID)
     PageTableEntryPtr pte;
 
     /* Go through the old processes page table and un map the pages */
-    MboxSend(frameMailbox, NULL, 0);     
-    for (int page = 0; page < numPages; page++) {
-        pte = &pageTable[old % MAXPROC][page];
 
-        if (pte->state == NOT_USED || pte->frame == PAGE_NOT_IN_FRAME) {
-            continue;
-        }
-
-        USLOSS_MmuUnmap(TAG, page);
-    }    
-
-    /* load the new processes mappings, which are current and valid */
+    /*
+    Load new valid mappings, else remove any page not associated with
+    current process
+    */
     for (int page = 0; page < numPages; page++) {
         pte = &pageTable[newPID % MAXPROC][page];
-        if (pte->state == NOT_USED || pte->frame == PAGE_NOT_IN_FRAME) {
-            USLOSS_MmuUnmap(TAG, page);
-            continue;
-        }
-
         frame = pte->frame;
-        USLOSS_MmuMap(TAG, page, frame, USLOSS_MMU_PROT_RW);
+
+        USLOSS_MmuUnmap(TAG, page);
+
+        if (frame != PAGE_NOT_IN_FRAME) {
+            USLOSS_MmuMap(TAG, page, frame, USLOSS_MMU_PROT_RW);            
+        }
     }   
-    MboxReceive(frameMailbox, NULL, 0);
 
     vmStats.switches++;
 
