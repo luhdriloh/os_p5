@@ -31,23 +31,37 @@ void p1_switch(int old, int newPID)
         return;
     }
 
-    int frame;
+    int frame, dirty;
     PageTableEntryPtr pte;
 
-    /* Go through the old processes page table and un map the pages */
+    /* Go through the old process and unmap the pages */
+    for (int page = 0; page < numPages; page++) {
+        pte = &pageTable[old % MAXPROC][page];
+        frame = pte->frame;
 
-    /*
-    Load new valid mappings, else remove any page not associated with
-    current process
-    */
+        if (frame != PAGE_NOT_IN_FRAME) {
+            dirty = 0;
+            
+            USLOSS_MmuGetAccess(frame, &dirty);
+            if (dirty >= DIRTY) {
+                frameTable[frame].dirty = DIRTY;
+            }
+            else if (dirty > 0) {
+                frameTable[frame].state = REFERENCED;
+            }
+
+            USLOSS_MmuUnmap(TAG, page);
+        }
+    }   
+
+
+    /* Go through the new process and map the pages */
     for (int page = 0; page < numPages; page++) {
         pte = &pageTable[newPID % MAXPROC][page];
         frame = pte->frame;
 
-        USLOSS_MmuUnmap(TAG, page);
-
         if (frame != PAGE_NOT_IN_FRAME) {
-            USLOSS_MmuMap(TAG, page, frame, USLOSS_MMU_PROT_RW);            
+            USLOSS_MmuMap(TAG, page, frame, USLOSS_MMU_PROT_RW);
         }
     }   
 
@@ -88,37 +102,10 @@ void p1_quit(int pid)
         }
 
         /* Zero out the page table entry */
-        pte->state = NOT_USED;
+        pte->state = UNREFERENCED;
         pte->frame = PAGE_NOT_IN_FRAME;
         pte->diskBlock = NOT_ON_DISK;
     }   
 
 
 } /* p1_quit */
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

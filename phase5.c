@@ -204,7 +204,7 @@ void *vmInitReal(int mappings, int pages, int frames, int pagers)
 
         /* Set default values for page tables */
         for (int page = 0; page < numPages; page++) {
-            pageTable[process][page].state = NOT_USED;
+            pageTable[process][page].state = UNREFERENCED;
             pageTable[process][page].frame = PAGE_NOT_IN_FRAME;
             pageTable[process][page].diskBlock = NOT_ON_DISK;
         }
@@ -403,7 +403,7 @@ static void FaultHandler(int  type /* USLOSS_MMU_INT */,
     assert(cause == USLOSS_MMU_FAULT);
     vmStats.faults++;
 
-    faultMsg = &(faults[pid % MAXPROC]);
+    faultMsg = &faults[pid % MAXPROC];
     faultMsg->pid = pid;
     faultMsg->offset = (long) arg;
     
@@ -422,16 +422,16 @@ static void FaultHandler(int  type /* USLOSS_MMU_INT */,
  * 
  *
  * Results:
- * None.
+ * Returns the index of the next frame to use
  *
  * Side effects:
- *
+ * Increments the clockHand
  *
  *----------------------------------------------------------------------
  */
 static int clockAlgorithm(PageTableEntryPtr pageToLoad) {
     FrameTableEntryPtr curFrame;
-    int dirty, frameToReturn;
+    int frameToReturn;
 
     frameToReturn = 0;
 
@@ -441,28 +441,21 @@ static int clockAlgorithm(PageTableEntryPtr pageToLoad) {
 
         if (curFrame->used == NOT_USED &&
             curFrame->pagerOwned == NOT_PAGER_OWNED) {
-            setFrameEntryMembers(curFrame->pid, frame, curFrame->state, curFrame->dirty, curFrame->pageNum, NOT_USED, PAGER_OWNED);
-            clockHand = (clockHand+1) % numFrames;
+            setFrameEntryMembers(curFrame->pid, frame, UNREFERENCED, curFrame->dirty, curFrame->pageNum, NOT_USED, PAGER_OWNED);
             return frame;
         }
     }
+
 
     /* Now using the clock hand look for the first unreferenced frame */
     MboxSend(clockHandMailbox, NULL, 0);
 
     while (1) {
-        dirty = 0;
         curFrame = &frameTable[clockHand];
-        
-        /* Lets check if the frame is dirty */
-        USLOSS_MmuGetAccess(clockHand, &dirty);
-        if (dirty >= DIRTY) {
-            curFrame->dirty = DIRTY;
-        }
 
         /* If the state is unreferenced and not pager owned take the frame */
-        if (curFrame->state == UNREFERENCED ||
-                curFrame->pagerOwned != PAGER_OWNED) {
+        if (curFrame->state == UNREFERENCED &&
+                curFrame->pagerOwned == NOT_PAGER_OWNED) {
             setFrameEntryMembers(curFrame->pid, clockHand, curFrame->state, curFrame->dirty, curFrame->pageNum, curFrame->used, PAGER_OWNED);
             frameToReturn = clockHand;
             clockHand = (clockHand+1) % numFrames;
@@ -470,10 +463,13 @@ static int clockAlgorithm(PageTableEntryPtr pageToLoad) {
         }
 
         if (curFrame->pagerOwned != PAGER_OWNED) {
+            USLOSS_MmuSetAccess(clockHand, (0 | curFrame->dirty));
             curFrame->state = UNREFERENCED;            
         }
+
         clockHand = (clockHand+1) % numFrames;
     }
+
     MboxReceive(clockHandMailbox, NULL, 0);
 
     return frameToReturn;
@@ -488,10 +484,10 @@ static int clockAlgorithm(PageTableEntryPtr pageToLoad) {
  * Kernel process that handles page faults and does page replacement.
  *
  * Results:
- * None.
+ * Maps a page to a frame
  *
  * Side effects:
- * None.
+ * Changes to the mmu, frameTable, and pageTable
  *
  *----------------------------------------------------------------------
  */
@@ -522,6 +518,7 @@ static int Pager(char *buf)
         /* Find frame to use with clockAlgorithm */  
         frameIndex = clockAlgorithm(pageToLoad);
         frameToUse = &frameTable[frameIndex];
+        // USLOSS_Console("\npid %d: page %d set to frame %d\n", pid, pageNum, frameIndex);
 
         /* Update the page table of the process that owns the frame */
         if (frameToUse->used == USED) {
@@ -547,9 +544,9 @@ static int Pager(char *buf)
                         TRACK_START, SECTORS_IN_FRAME, (void *) buf);
                 checkDiskStatus(diskStatus, "Pager(): writing to disk");
             }
+            
             /* Set page table entry on old process */
-            USLOSS_MmuUnmap(TAG, indexPageToSave);
-            setPageEntryMembers(pidToSave, indexPageToSave, USED,
+            setPageEntryMembers(pidToSave, indexPageToSave, REFERENCED,
                                     PAGE_NOT_IN_FRAME, pageToChange->diskBlock);
         }
 
@@ -568,17 +565,16 @@ static int Pager(char *buf)
         }
 
         /* Set members inside frame entry and process page table */
-        if (pageToLoad->state == NOT_USED) {
+        if (pageToLoad->state == UNREFERENCED) {
             vmStats.new++;
         }
 
-        setFrameEntryMembers(pid, frameIndex, REFERENCED, CLEAN, pageNum, USED, NOT_PAGER_OWNED);
-        setPageEntryMembers(pid, pageNum, USED, frameIndex,
+        setFrameEntryMembers(pid, frameIndex, UNREFERENCED, CLEAN, pageNum, USED, NOT_PAGER_OWNED);
+        setPageEntryMembers(pid, pageNum, REFERENCED, frameIndex,
                             pageToLoad->diskBlock);
 
-        /* Map the page to frame, wake fault handler, and set access bit */
-        USLOSS_MmuSetAccess(frameIndex, REFERENCED);
-        USLOSS_MmuMap(TAG, pageNum, frameIndex, USLOSS_MMU_PROT_RW);
+        /* Set access bit */
+        USLOSS_MmuSetAccess(frameIndex, 0);
 
         MboxSend(faultPtr->replyMbox, NULL, 0);
     }
@@ -679,7 +675,7 @@ void checkDiskStatus(int status, char *name)
  * None.
  *
  * Side effects:
- * Halt USLOSS
+ * Reads or writes to a frame
  *
  *----------------------------------------------------------------------
  */
@@ -704,7 +700,7 @@ void readWriteToFrame(int frameIndex, void *dest, void *src)
  * None.
  *
  * Side effects:
- * Halt USLOSS
+ * Finds an open track
  *
  *----------------------------------------------------------------------
  */
@@ -724,41 +720,4 @@ int findOpenTrack()
 
     return -1;
 }
-
-
-// TODO: mutual exclusion for clock hand
-// TODO: vmdestroy
-// TODO: vmStats
-// TODO: p1 function
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
